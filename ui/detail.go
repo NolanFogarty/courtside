@@ -26,9 +26,15 @@ type playerStat struct {
 	oreb, dreb, stl, pf          int
 }
 
-// recorded reports whether the player has any box-score contribution. Players
-// with an empty line are shown dimmed.
-func (p playerStat) recorded() bool {
+// played reports whether the player saw any court time. Minutes are the
+// authoritative signal (a player can log time without recording a stat); the
+// stat-line check is a fallback for sub-minute appearances, since minutes are
+// truncated to whole numbers upstream. Players who didn't play are dimmed and
+// are the first to be dropped when the column doesn't fit.
+func (p playerStat) played() bool {
+	if p.min != "" && p.min != "0" {
+		return true
+	}
 	return p.pts != 0 || p.ast != 0 || p.reb != 0 || p.blk != 0 || p.to != 0
 }
 
@@ -270,6 +276,68 @@ func (m detail) leftColumnHeight() int {
 	return lipgloss.Height(m.renderPlayerColumn())
 }
 
+// playerColumnBudget is the vertical space the player column can occupy before
+// it overflows the screen: the window height minus the document margins, the
+// scoreboard header (3) and the blank line under it, the bottom help hint, and
+// the minimum one-line spacer above that hint. A non-positive height (before
+// the first WindowSizeMsg) yields a huge budget so nothing is trimmed yet.
+func (m detail) playerColumnBudget() int {
+	if m.height <= 0 {
+		return 1 << 30
+	}
+	_, vFrame := docStyle.GetFrameSize()
+	const headerH, blankH, hintH, minSpacerH = 3, 1, 1, 1
+	return m.height - vFrame - headerH - blankH - hintH - minSpacerH
+}
+
+// rosters returns each team's players sorted by points (descending), trimmed to
+// fit the vertical budget. Only DNPs (players with an empty stat line, sorted to
+// the bottom) are dropped, and only as many as needed — fewest first — so the
+// column fills the screen instead of collapsing to all-or-nothing. Removals are
+// balanced across the two teams so neither side looks lopsided.
+func (m detail) rosters() (away, home []playerStat) {
+	away = sortedByPoints(m.game.away.players)
+	home = sortedByPoints(m.game.home.players)
+
+	over := m.columnHeightFor(away, home) - m.playerColumnBudget()
+	for over > 0 {
+		// Drop a DNP from the taller list first to keep the two balanced.
+		switch {
+		case len(away) >= len(home) && droppableDNP(away):
+			away = away[:len(away)-1]
+		case droppableDNP(home):
+			home = home[:len(home)-1]
+		case droppableDNP(away):
+			away = away[:len(away)-1]
+		default:
+			return // no DNPs left to drop; recorded players stay even if clipped
+		}
+		over--
+	}
+	return
+}
+
+// droppableDNP reports whether the last player in a points-sorted slice is a DNP
+// (did not play) and can therefore be trimmed.
+func droppableDNP(players []playerStat) bool {
+	return len(players) > 0 && !players[len(players)-1].played()
+}
+
+// sortedByPoints returns a copy of players ordered by points, highest first.
+func sortedByPoints(players []playerStat) []playerStat {
+	out := append([]playerStat(nil), players...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].pts > out[j].pts })
+	return out
+}
+
+// columnHeightFor measures the left column's height with the given rosters.
+func (m detail) columnHeightFor(away, home []playerStat) int {
+	a := m.renderTeamTable(m.game.away, awayColor, away)
+	bar := m.renderTeamBar()
+	h := m.renderTeamTable(m.game.home, homeColor, home)
+	return lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, a, "", bar, "", h))
+}
+
 // pbpVisible is how many play-by-play lines show at once: enough to fill the
 // play-by-play box to the full height of the left column.
 func (m detail) pbpVisible() int {
@@ -379,9 +447,10 @@ func (m detail) renderMain(width int) string {
 // renderPlayerColumn stacks the away player table, the horizontal team-stats
 // bar, and the home player table vertically.
 func (m detail) renderPlayerColumn() string {
-	away := m.renderTeamTable(m.game.away, awayColor)
+	awayPlayers, homePlayers := m.rosters()
+	away := m.renderTeamTable(m.game.away, awayColor, awayPlayers)
 	bar := m.renderTeamBar()
-	home := m.renderTeamTable(m.game.home, homeColor)
+	home := m.renderTeamTable(m.game.home, homeColor, homePlayers)
 	return lipgloss.JoinVertical(lipgloss.Left, away, "", bar, "", home)
 }
 
@@ -475,7 +544,9 @@ func tableWidth(cols []statCol) int {
 	return w
 }
 
-func (m detail) renderTeamTable(t teamBox, teamColor color.Color) string {
+// renderTeamTable renders one team's box score from an already-sorted, already-
+// trimmed player slice (see rosters). DNP rows that survive trimming are dimmed.
+func (m detail) renderTeamTable(t teamBox, teamColor color.Color, players []playerStat) string {
 	cols := m.playerCols()
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(teamColor).
@@ -486,11 +557,6 @@ func (m detail) renderTeamTable(t teamBox, teamColor color.Color) string {
 		hdr += " " + pad(c.header, c.width, true)
 	}
 
-	players := append([]playerStat(nil), t.players...)
-	sort.SliceStable(players, func(i, j int) bool {
-		return players[i].pts > players[j].pts
-	})
-
 	rows := make([]string, 0, len(players)+2)
 	rows = append(rows, title, colHeaderSty.Render(hdr))
 	for _, p := range players {
@@ -498,7 +564,7 @@ func (m detail) renderTeamTable(t teamBox, teamColor color.Color) string {
 		for _, c := range cols {
 			row += " " + pad(c.value(p), c.width, true)
 		}
-		if !p.recorded() {
+		if !p.played() {
 			row = dimRowSty.Render(row)
 		}
 		rows = append(rows, row)
