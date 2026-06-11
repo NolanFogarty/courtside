@@ -348,8 +348,8 @@ func (m detail) teamVisibleRows() int {
 	// each of which spends 4 lines on chrome (border, title, header).
 	barBlock := lipgloss.Height(m.renderTeamBar()) + 2
 	perTeam := (m.playerColumnBudget() - barBlock - 2*4) / 2
-	if perTeam < 3 {
-		perTeam = 3 // keep a usable window even on very short screens
+	if perTeam < 1 {
+		perTeam = 1 // always show at least one player per side
 	}
 	if perTeam > maxN {
 		perTeam = maxN
@@ -430,9 +430,17 @@ func (m detail) View() tea.View {
 		)
 	}
 
+	// The hint must always stay visible. On a terminal too short to hold the
+	// whole body plus the hint (and a one-line spacer), clip the body rather than
+	// letting the alt-screen renderer drop the hint off the bottom.
+	availH := m.height - vFrame
+	if maxBodyH := availH - lipgloss.Height(hint) - 1; maxBodyH > 0 && lipgloss.Height(body) > maxBodyH {
+		body = lipgloss.NewStyle().MaxHeight(maxBodyH).Render(body)
+	}
+
 	// Push the hint to the bottom of the screen with a spacer that fills the
 	// leftover height between the body and the hint.
-	spacerH := m.height - vFrame - lipgloss.Height(body) - lipgloss.Height(hint)
+	spacerH := availH - lipgloss.Height(body) - lipgloss.Height(hint)
 	if spacerH < 1 {
 		spacerH = 1
 	}
