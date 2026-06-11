@@ -29,8 +29,7 @@ type playerStat struct {
 // played reports whether the player saw any court time. Minutes are the
 // authoritative signal (a player can log time without recording a stat); the
 // stat-line check is a fallback for sub-minute appearances, since minutes are
-// truncated to whole numbers upstream. Players who didn't play are dimmed and
-// are the first to be dropped when the column doesn't fit.
+// truncated to whole numbers upstream. Players who didn't play are dimmed.
 func (p playerStat) played() bool {
 	if p.min != "" && p.min != "0" {
 		return true
@@ -100,6 +99,10 @@ var (
 			Border(lipgloss.RoundedBorder()).BorderForeground(dimColor)
 	panelSty = lipgloss.NewStyle().Padding(0, 1).
 			Border(lipgloss.RoundedBorder()).BorderForeground(dimColor)
+	// focusedPanelSty highlights the currently selected (scrollable) box with an
+	// accent-colored border.
+	focusedPanelSty = lipgloss.NewStyle().Padding(0, 1).
+			Border(lipgloss.RoundedBorder()).BorderForeground(accentColor)
 	colHeaderSty = lipgloss.NewStyle().Bold(true).Foreground(mutedColor)
 	dimRowSty    = lipgloss.NewStyle().Foreground(dimColor)
 	mutedSty     = lipgloss.NewStyle().Foreground(mutedColor)
@@ -135,16 +138,30 @@ const (
 
 // ---- model ---------------------------------------------------------------
 
+// panelFocus identifies which of the three scrollable boxes is currently
+// selected (and therefore highlighted and driven by the scroll keys). The
+// play-by-play feed is focused by default (zero value).
+type panelFocus int
+
+const (
+	focusPBP panelFocus = iota
+	focusAway
+	focusHome
+)
+
 type detail struct {
 	gameID        string
 	game          gameDetail
 	loading       bool
 	err           error
-	scheduled     bool   // game hasn't tipped off yet; no stats to fetch
-	tipoff        string // start time, shown when scheduled
-	live          bool   // game in progress; auto-refresh its data
-	expanded      bool   // show detailed (expanded) stats
-	scroll        int    // play-by-play scroll offset (0 = newest at top)
+	scheduled     bool       // game hasn't tipped off yet; no stats to fetch
+	tipoff        string     // start time, shown when scheduled
+	live          bool       // game in progress; auto-refresh its data
+	expanded      bool       // show detailed (expanded) stats
+	focus         panelFocus // which box the scroll keys drive
+	awayScroll    int        // away box scroll offset (0 = top scorer first)
+	homeScroll    int        // home box scroll offset
+	pbpScroll     int        // play-by-play scroll offset (0 = newest at top)
 	width, height int
 }
 
@@ -215,20 +232,39 @@ func (m detail) Update(msg tea.Msg) (detail, tea.Cmd) {
 		switch msg.String() {
 		case "o":
 			m.expanded = !m.expanded
-			if m.scroll > m.maxScroll() {
-				m.scroll = m.maxScroll()
-			}
+			m.clampScrolls()
+		case "tab", "right", "l":
+			m.focus = (m.focus + 1) % 3
+		case "shift+tab", "left", "h":
+			m.focus = (m.focus + 2) % 3
 		case "up", "k":
-			if m.scroll > 0 {
-				m.scroll--
-			}
+			m.scrollFocused(-1)
 		case "down", "j":
-			if m.scroll < m.maxScroll() {
-				m.scroll++
-			}
+			m.scrollFocused(1)
 		}
 	}
 	return m, nil
+}
+
+// scrollFocused moves the focused box's scroll offset by delta, clamped to that
+// box's range.
+func (m *detail) scrollFocused(delta int) {
+	switch m.focus {
+	case focusAway:
+		m.awayScroll = clampInt(m.awayScroll+delta, 0, m.awayMaxScroll())
+	case focusHome:
+		m.homeScroll = clampInt(m.homeScroll+delta, 0, m.homeMaxScroll())
+	default: // focusPBP
+		m.pbpScroll = clampInt(m.pbpScroll+delta, 0, m.maxScroll())
+	}
+}
+
+// clampScrolls re-clamps every box's scroll offset, used after a layout change
+// (e.g. toggling expanded stats) shrinks a box's scroll range.
+func (m *detail) clampScrolls() {
+	m.awayScroll = clampInt(m.awayScroll, 0, m.awayMaxScroll())
+	m.homeScroll = clampInt(m.homeScroll, 0, m.homeMaxScroll())
+	m.pbpScroll = clampInt(m.pbpScroll, 0, m.maxScroll())
 }
 
 // toGameDetail maps the backend's GameDetail into the view's render types.
@@ -290,39 +326,6 @@ func (m detail) playerColumnBudget() int {
 	return m.height - vFrame - headerH - blankH - hintH - minSpacerH
 }
 
-// rosters returns each team's players sorted by points (descending), trimmed to
-// fit the vertical budget. Only DNPs (players with an empty stat line, sorted to
-// the bottom) are dropped, and only as many as needed — fewest first — so the
-// column fills the screen instead of collapsing to all-or-nothing. Removals are
-// balanced across the two teams so neither side looks lopsided.
-func (m detail) rosters() (away, home []playerStat) {
-	away = sortedByPoints(m.game.away.players)
-	home = sortedByPoints(m.game.home.players)
-
-	over := m.columnHeightFor(away, home) - m.playerColumnBudget()
-	for over > 0 {
-		// Drop a DNP from the taller list first to keep the two balanced.
-		switch {
-		case len(away) >= len(home) && droppableDNP(away):
-			away = away[:len(away)-1]
-		case droppableDNP(home):
-			home = home[:len(home)-1]
-		case droppableDNP(away):
-			away = away[:len(away)-1]
-		default:
-			return // no DNPs left to drop; recorded players stay even if clipped
-		}
-		over--
-	}
-	return
-}
-
-// droppableDNP reports whether the last player in a points-sorted slice is a DNP
-// (did not play) and can therefore be trimmed.
-func droppableDNP(players []playerStat) bool {
-	return len(players) > 0 && !players[len(players)-1].played()
-}
-
 // sortedByPoints returns a copy of players ordered by points, highest first.
 func sortedByPoints(players []playerStat) []playerStat {
 	out := append([]playerStat(nil), players...)
@@ -330,12 +333,45 @@ func sortedByPoints(players []playerStat) []playerStat {
 	return out
 }
 
-// columnHeightFor measures the left column's height with the given rosters.
-func (m detail) columnHeightFor(away, home []playerStat) int {
-	a := m.renderTeamTable(m.game.away, awayColor, away)
-	bar := m.renderTeamBar()
-	h := m.renderTeamTable(m.game.home, homeColor, home)
-	return lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, a, "", bar, "", h))
+// teamVisibleRows is how many player rows each team box shows. When the full
+// rosters fit the vertical budget every player is shown; otherwise the boxes are
+// capped to a shorter, scrollable window (split evenly so the two sides stay
+// balanced) rather than dropping players. Both teams use the same row count.
+func (m detail) teamVisibleRows() int {
+	maxN := len(m.game.away.players)
+	if n := len(m.game.home.players); n > maxN {
+		maxN = n
+	}
+
+	// The bar (header + 2 team rows + border) plus a blank line above and below
+	// is fixed overhead; the rest of the budget is split between the two boxes,
+	// each of which spends 4 lines on chrome (border, title, header).
+	barBlock := lipgloss.Height(m.renderTeamBar()) + 2
+	perTeam := (m.playerColumnBudget() - barBlock - 2*4) / 2
+	if perTeam < 1 {
+		perTeam = 1 // always show at least one player per side
+	}
+	if perTeam > maxN {
+		perTeam = maxN
+	}
+	return perTeam
+}
+
+// awayMaxScroll / homeMaxScroll report how far each team box can scroll given
+// its roster size and the current visible-row window.
+func (m detail) awayMaxScroll() int {
+	return teamScrollMax(len(m.game.away.players), m.teamVisibleRows())
+}
+
+func (m detail) homeMaxScroll() int {
+	return teamScrollMax(len(m.game.home.players), m.teamVisibleRows())
+}
+
+func teamScrollMax(total, visible int) int {
+	if total <= visible {
+		return 0
+	}
+	return total - visible
 }
 
 // pbpVisible is how many play-by-play lines show at once: enough to fill the
@@ -386,6 +422,7 @@ func (m detail) View() tea.View {
 			statsDesc = "less stats"
 		}
 		hint = renderHints(
+			[2]string{"tab/←→", "switch box"},
 			[2]string{"↑/k", "up"},
 			[2]string{"↓/j", "down"},
 			[2]string{"o", statsDesc},
@@ -393,9 +430,17 @@ func (m detail) View() tea.View {
 		)
 	}
 
+	// The hint must always stay visible. On a terminal too short to hold the
+	// whole body plus the hint (and a one-line spacer), clip the body rather than
+	// letting the alt-screen renderer drop the hint off the bottom.
+	availH := m.height - vFrame
+	if maxBodyH := availH - lipgloss.Height(hint) - 1; maxBodyH > 0 && lipgloss.Height(body) > maxBodyH {
+		body = lipgloss.NewStyle().MaxHeight(maxBodyH).Render(body)
+	}
+
 	// Push the hint to the bottom of the screen with a spacer that fills the
 	// leftover height between the body and the hint.
-	spacerH := m.height - vFrame - lipgloss.Height(body) - lipgloss.Height(hint)
+	spacerH := availH - lipgloss.Height(body) - lipgloss.Height(hint)
 	if spacerH < 1 {
 		spacerH = 1
 	}
@@ -439,24 +484,29 @@ func (m detail) renderMain(width int) string {
 	if rightW < 24 {
 		rightW = 24
 	}
-	right := m.renderInfoColumn(rightW, lipgloss.Height(left))
+	right := m.renderInfoColumn(rightW, lipgloss.Height(left), m.focus == focusPBP)
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", right)
 }
 
 // renderPlayerColumn stacks the away player table, the horizontal team-stats
-// bar, and the home player table vertically.
+// bar, and the home player table vertically. Each team table is a scrollable
+// window into its (points-sorted) roster, sized by teamVisibleRows; the focused
+// box is highlighted.
 func (m detail) renderPlayerColumn() string {
-	awayPlayers, homePlayers := m.rosters()
-	away := m.renderTeamTable(m.game.away, awayColor, awayPlayers)
+	rows := m.teamVisibleRows()
+	away := m.renderTeamTable(m.game.away, awayColor,
+		sortedByPoints(m.game.away.players), m.focus == focusAway, rows, m.awayScroll)
 	bar := m.renderTeamBar()
-	home := m.renderTeamTable(m.game.home, homeColor, homePlayers)
+	home := m.renderTeamTable(m.game.home, homeColor,
+		sortedByPoints(m.game.home.players), m.focus == focusHome, rows, m.homeScroll)
 	return lipgloss.JoinVertical(lipgloss.Left, away, "", bar, "", home)
 }
 
 // renderInfoColumn renders the play-by-play box, sized to its own content width
-// (bounded by w) and stretched to the full height of the left column.
-func (m detail) renderInfoColumn(w, height int) string {
+// (bounded by w) and stretched to the full height of the left column. The box
+// border is highlighted when focused.
+func (m detail) renderInfoColumn(w, height int, focused bool) string {
 	maxW := w - 4 // box border (2) + padding (2)
 	if maxW < 24 {
 		maxW = 24
@@ -469,7 +519,11 @@ func (m detail) renderInfoColumn(w, height int) string {
 	if nat := lipgloss.Height(pbp) + 2; target < nat {
 		target = nat
 	}
-	return panelSty.Height(target).Render(pbp)
+	sty := panelSty
+	if focused {
+		sty = focusedPanelSty
+	}
+	return sty.Height(target).Render(pbp)
 }
 
 // pbpWidth is the content width the play-by-play feed needs to show its longest
@@ -544,22 +598,33 @@ func tableWidth(cols []statCol) int {
 	return w
 }
 
-// renderTeamTable renders one team's box score from an already-sorted, already-
-// trimmed player slice (see rosters). DNP rows that survive trimming are dimmed.
-func (m detail) renderTeamTable(t teamBox, teamColor color.Color, players []playerStat) string {
+// renderTeamTable renders one team's box score as a scrollable window into the
+// (already points-sorted) player slice: at most maxRows player rows starting at
+// scroll, with a compact ↑/↓ indicator of how many are hidden. DNP rows are
+// dimmed. The box border is highlighted when focused.
+func (m detail) renderTeamTable(t teamBox, teamColor color.Color, players []playerStat, focused bool, maxRows, scroll int) string {
 	cols := m.playerCols()
+
+	total := len(players)
+	if maxRows > total {
+		maxRows = total
+	}
+	scroll = clampInt(scroll, 0, total-maxRows)
+	window := players[scroll : scroll+maxRows]
+	above, below := scroll, total-scroll-maxRows
 
 	title := lipgloss.NewStyle().Bold(true).Foreground(teamColor).
 		Render(fmt.Sprintf("%s (%d)", t.name, t.score))
+	title += scrollHint(above, below)
 
 	hdr := pad("PLAYER", wName, false)
 	for _, c := range cols {
 		hdr += " " + pad(c.header, c.width, true)
 	}
 
-	rows := make([]string, 0, len(players)+2)
+	rows := make([]string, 0, len(window)+2)
 	rows = append(rows, title, colHeaderSty.Render(hdr))
-	for _, p := range players {
+	for _, p := range window {
 		row := pad(truncate(p.name, wName), wName, false)
 		for _, c := range cols {
 			row += " " + pad(c.value(p), c.width, true)
@@ -570,7 +635,27 @@ func (m detail) renderTeamTable(t teamBox, teamColor color.Color, players []play
 		rows = append(rows, row)
 	}
 
-	return panelSty.Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
+	sty := panelSty
+	if focused {
+		sty = focusedPanelSty
+	}
+	return sty.Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
+}
+
+// scrollHint renders a compact "↑N ↓N" indicator of how many rows are hidden
+// above and below a scroll window. Empty when nothing is hidden.
+func scrollHint(above, below int) string {
+	if above == 0 && below == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	if above > 0 {
+		parts = append(parts, fmt.Sprintf("↑%d", above))
+	}
+	if below > 0 {
+		parts = append(parts, fmt.Sprintf("↓%d", below))
+	}
+	return hintSty.Render("  " + strings.Join(parts, " "))
 }
 
 // width of each team-stats bar stat column.
@@ -682,7 +767,7 @@ func (m detail) barTeamRow(rows []statRow, tricode string, teamColor color.Color
 func (m detail) renderPBPColumn(w int) string {
 	visible := m.pbpVisible()
 	plays := m.game.plays
-	start := m.scroll
+	start := m.pbpScroll
 	if start > m.maxScroll() {
 		start = m.maxScroll()
 	}
@@ -778,4 +863,19 @@ func signed(n int) string {
 		return fmt.Sprintf("+%d", n)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+// clampInt constrains v to the inclusive [lo, hi] range. A hi below lo (an empty
+// range) collapses to lo.
+func clampInt(v, lo, hi int) int {
+	if hi < lo {
+		return lo
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
