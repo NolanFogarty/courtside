@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -13,8 +14,10 @@ import (
 
 // PlayerLine is one player's box-score line.
 type PlayerLine struct {
-	Name string
-	Min  string // minutes played
+	Name     string
+	Min      string // minutes played
+	Starter  bool
+	PersonID int
 
 	Pts, Ast, Reb, Blk, To int
 	PlusMinus              int
@@ -82,10 +85,19 @@ func fetchBoxScore(client *nba.Client, ctx context.Context, gameID string) (Game
 	if box, err := client.Live.BoxScore(ctx, gameID); err == nil {
 		g := box.Game
 		if len(g.HomeTeam.Players) > 0 || len(g.AwayTeam.Players) > 0 {
-			return GameDetail{
+			detail := GameDetail{
 				Away: liveTeamDetail(g.AwayTeam),
 				Home: liveTeamDetail(g.HomeTeam),
-			}, nil
+			}
+			if !hasStarters(detail.Away) || !hasStarters(detail.Home) {
+				if statsBox, statsErr := client.Stats.BoxScoreTraditionalV3(ctx, gameID); statsErr == nil {
+					applyStarterFlags(&detail.Away, statsBox.BoxScoreTraditional.AwayTeam)
+					applyStarterFlags(&detail.Home, statsBox.BoxScoreTraditional.HomeTeam)
+				}
+			}
+			inferStartersByMinutes(&detail.Away)
+			inferStartersByMinutes(&detail.Home)
+			return detail, nil
 		}
 	}
 
@@ -165,6 +177,8 @@ func toTeamDetail(t stats.BoxTeam) TeamDetail {
 		ps := p.Statistics
 		td.Players = append(td.Players, PlayerLine{
 			Name:      name,
+			Starter:   p.Starter,
+			PersonID:  p.PersonID,
 			Min:       fmtMinutes(ps.Minutes),
 			Pts:       ps.Points,
 			Ast:       ps.Assists,
@@ -222,6 +236,8 @@ func liveTeamDetail(t live.BoxScoreTeam) TeamDetail {
 		ps := p.Statistics
 		td.Players = append(td.Players, PlayerLine{
 			Name:      name,
+			Starter:   p.Starter == "1",
+			PersonID:  p.PersonID,
 			Min:       fmtMinutes(ps.Minutes),
 			Pts:       ps.Points,
 			Ast:       ps.Assists,
@@ -242,6 +258,73 @@ func liveTeamDetail(t live.BoxScoreTeam) TeamDetail {
 		})
 	}
 	return td
+}
+
+func hasStarters(team TeamDetail) bool {
+	for _, player := range team.Players {
+		if player.Starter {
+			return true
+		}
+	}
+	return false
+}
+
+func applyStarterFlags(team *TeamDetail, source stats.BoxTeam) {
+	starters := make(map[int]bool)
+	count := 0
+	for _, player := range source.Players {
+		if player.Starter {
+			starters[player.PersonID] = true
+			count++
+		}
+	}
+	if count == 0 {
+		return
+	}
+	for i := range team.Players {
+		team.Players[i].Starter = starters[team.Players[i].PersonID]
+	}
+}
+
+func inferStartersByMinutes(team *TeamDetail) {
+	count := 0
+	scored := false
+	for _, player := range team.Players {
+		if player.Starter {
+			count++
+		}
+		if minuteValue(player.Min) > 0 {
+			scored = true
+		}
+	}
+	if count == 5 || len(team.Players) < 5 {
+		return
+	}
+	if !scored {
+		return
+	}
+
+	indices := make([]int, len(team.Players))
+	for i := range indices {
+		indices[i] = i
+	}
+	sort.SliceStable(indices, func(i, j int) bool {
+		return minuteValue(team.Players[indices[i]].Min) > minuteValue(team.Players[indices[j]].Min)
+	})
+	for i := range team.Players {
+		team.Players[i].Starter = false
+	}
+	for _, i := range indices[:5] {
+		team.Players[i].Starter = true
+	}
+}
+
+func minuteValue(raw string) int {
+	minutes, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0
+	}
+	return minutes
 }
 
 // fmtMinutes extracts whole minutes from the box score's minutes field, which

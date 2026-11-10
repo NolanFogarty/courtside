@@ -24,7 +24,10 @@ func validateGames(t *testing.T, games []Game) {
 }
 
 func TestGetLiveGames(t *testing.T) {
-	games := GetLiveGames()
+	games, err := GetLiveGames()
+	if err != nil {
+		t.Skipf("live endpoint unavailable: %v", err)
+	}
 
 	if games == nil {
 		t.Fatal("GetLiveGames() returned nil")
@@ -40,7 +43,10 @@ func TestGetLiveGames(t *testing.T) {
 }
 
 func TestGetScheduledGames(t *testing.T) {
-	games := GetScheduledGames()
+	games, err := GetScheduledGames()
+	if err != nil {
+		t.Skipf("live endpoint unavailable: %v", err)
+	}
 
 	if games == nil {
 		t.Fatal("GetScheduledGames() returned nil")

@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"image/color"
 	"sort"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/NolanFogarty/courtside/backend"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ---- data ----------------------------------------------------------------
@@ -19,6 +21,7 @@ import (
 type playerStat struct {
 	name                              string
 	min                               string
+	starter                           bool
 	pts, ast, reb, blk, to, plusMinus int
 
 	// expanded detail
@@ -94,7 +97,7 @@ var (
 	homeColor    = lipgloss.Color("203") // red
 	mutedColor   = lipgloss.Color("245")
 	dimColor     = lipgloss.Color("240")
-	accentColor  = lipgloss.Color("214")
+	accentColor  = lipgloss.Color("15")
 	headerBarSty = lipgloss.NewStyle().Bold(true).Padding(0, 1).
 			Border(lipgloss.RoundedBorder()).BorderForeground(dimColor)
 	panelSty = lipgloss.NewStyle().Padding(0, 1).
@@ -103,31 +106,21 @@ var (
 	// accent-colored border.
 	focusedPanelSty = lipgloss.NewStyle().Padding(0, 1).
 			Border(lipgloss.RoundedBorder()).BorderForeground(accentColor)
-	colHeaderSty = lipgloss.NewStyle().Bold(true).Foreground(mutedColor)
-	dimRowSty    = lipgloss.NewStyle().Foreground(dimColor)
-	mutedSty     = lipgloss.NewStyle().Foreground(mutedColor)
-	accentSty    = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
-	hintSty      = lipgloss.NewStyle().Foreground(mutedColor)
-	errSty       = lipgloss.NewStyle().Bold(true).Foreground(homeColor)
+	colHeaderSty   = lipgloss.NewStyle().Bold(true).Foreground(mutedColor)
+	dimRowSty      = lipgloss.NewStyle().Foreground(dimColor)
+	mutedSty       = lipgloss.NewStyle().Foreground(mutedColor)
+	accentSty      = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	scoreWinnerSty = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("22")).Padding(0, 1)
+	scoreLoserSty  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("88")).Padding(0, 1)
+	hintSty        = lipgloss.NewStyle().Foreground(mutedColor)
+	errSty         = lipgloss.NewStyle().Bold(true).Foreground(homeColor)
 
 	// help-bar styling matched to the bubbles list help: muted key/desc/separator
 	// colors and the list's left padding, so all key hints look the same.
 	helpKeySty  = lipgloss.NewStyle().Foreground(lipgloss.Color("#626262"))
 	helpDescSty = lipgloss.NewStyle().Foreground(lipgloss.Color("#4A4A4A"))
 	helpSepSty  = lipgloss.NewStyle().Foreground(lipgloss.Color("#3C3C3C"))
-	helpSty     = lipgloss.NewStyle().PaddingLeft(2)
 )
-
-// renderHints renders key/description pairs in the same muted colors, separator,
-// and left padding as the bubbles list's help bar.
-func renderHints(pairs ...[2]string) string {
-	sep := helpSepSty.Render(" • ")
-	parts := make([]string, len(pairs))
-	for i, p := range pairs {
-		parts[i] = helpKeySty.Render(p[0]) + " " + helpDescSty.Render(p[1])
-	}
-	return helpSty.Render(strings.Join(parts, sep))
-}
 
 // stat-table column widths
 const (
@@ -154,10 +147,17 @@ type detail struct {
 	game          gameDetail
 	loading       bool
 	err           error
-	scheduled     bool       // game hasn't tipped off yet; no stats to fetch
-	tipoff        string     // start time, shown when scheduled
-	live          bool       // game in progress; auto-refresh its data
-	expanded      bool       // show detailed (expanded) stats
+	scheduled     bool   // game hasn't tipped off yet; no stats to fetch
+	tipoff        string // start time, shown when scheduled
+	live          bool   // game in progress; auto-refresh its data
+	refreshCount  int    // auto-refresh polls since opening; stops runaway live polling
+	fullPbp       bool   // play-by-play expanded to full screen
+	fullScroll    int    // fullscreen row offset into the wrapped feed
+	expanded      bool   // show detailed (expanded) stats
+	sortMode      bool
+	sortColumn    int
+	sortBy        string
+	sortDesc      bool
 	focus         panelFocus // which box the scroll keys drive
 	awayScroll    int        // away box scroll offset (0 = top scorer first)
 	homeScroll    int        // home box scroll offset
@@ -181,33 +181,40 @@ func newDetail(g backend.Game, width, height int) detail {
 	return d
 }
 
-// refreshCmd re-fetches the box score and play-by-play, but only while the game
-// is live. Existing scroll position and expanded state are preserved by Update.
+// refreshCmd re-fetches the box score and play-by-play while the game is live
+// or still scheduled (a pre-tip game may tip while open). Live polling stops
+// after maxLiveRefreshes to avoid polling forever once the game is final.
+// Existing scroll position and expanded state are preserved by Update.
 func (m detail) refreshCmd() tea.Cmd {
-	if !m.live {
+	if !m.live && !m.scheduled {
+		return nil
+	}
+	if m.live && m.refreshCount >= maxLiveRefreshes {
 		return nil
 	}
 	id := m.gameID
 	return func() tea.Msg {
 		d, err := backend.GetGameDetail(id)
-		return gameDetailMsg{detail: d, err: err}
+		return gameDetailMsg{gameID: id, detail: d, err: err}
 	}
 }
 
 // gameDetailMsg carries the result of the async GetGameDetail fetch.
 type gameDetailMsg struct {
+	gameID string
 	detail backend.GameDetail
 	err    error
 }
 
+// maxLiveRefreshes caps live auto-refresh at ~3 hours (15s interval) so a game
+// watched to final doesn't poll forever.
+const maxLiveRefreshes = 720
+
 func (m detail) Init() tea.Cmd {
-	if m.scheduled {
-		return nil // nothing to fetch until the game starts
-	}
 	id := m.gameID
 	return func() tea.Msg {
 		d, err := backend.GetGameDetail(id)
-		return gameDetailMsg{detail: d, err: err}
+		return gameDetailMsg{gameID: id, detail: d, err: err}
 	}
 }
 
@@ -216,6 +223,9 @@ func (m detail) Update(msg tea.Msg) (detail, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case gameDetailMsg:
+		if msg.gameID != m.gameID {
+			return m, nil
+		}
 		wasLoading := m.loading
 		m.loading = false
 		if msg.err != nil {
@@ -223,13 +233,79 @@ func (m detail) Update(msg tea.Msg) (detail, tea.Cmd) {
 			// auto-refresh failures and keep showing the last good data.
 			if wasLoading {
 				m.err = msg.err
+			} else if m.live || m.scheduled {
+				m.refreshCount++
+				if m.live && m.refreshCount >= maxLiveRefreshes {
+					m.live = false
+				}
 			}
 		} else {
-			m.game = toGameDetail(msg.detail)
+			game := toGameDetail(msg.detail)
+			// A scheduled game has no box score yet, so an empty response
+			// must not wipe the seeded header (names and scores).
+			if game.away.name == "" && len(game.away.players) == 0 {
+				game.away = m.game.away
+			}
+			if game.home.name == "" && len(game.home.players) == 0 {
+				game.home = m.game.home
+			}
+			m.game = game
 			m.err = nil
+			if m.scheduled && len(msg.detail.Away.Players)+len(msg.detail.Home.Players) > 0 {
+				m.scheduled = false
+				m.live = true
+				m.refreshCount = 0
+			} else if (m.live || m.scheduled) && !wasLoading {
+				m.refreshCount++
+				if m.live && m.refreshCount >= maxLiveRefreshes {
+					m.live = false
+				}
+			}
 		}
 	case tea.KeyPressMsg:
+		if m.sortMode {
+			switch msg.String() {
+			case "esc", "q":
+				m.sortMode = false
+			case "left", "h":
+				m.sortColumn = (m.sortColumn + len(m.playerCols()) - 1) % len(m.playerCols())
+			case "right", "l":
+				m.sortColumn = (m.sortColumn + 1) % len(m.playerCols())
+			case "enter":
+				m.applySelectedSort()
+			case "up", "down":
+				m.applySelectedSort()
+			}
+			return m, nil
+		}
+		if m.fullPbp {
+			switch msg.String() {
+			case "esc", "q", "enter":
+				m.fullPbp = false
+			case "up", "k":
+				m.fullScroll = clampInt(m.fullScroll-1, 0, m.fullMaxScroll())
+			case "down", "j":
+				m.fullScroll = clampInt(m.fullScroll+1, 0, m.fullMaxScroll())
+			case "pgup":
+				m.fullScroll = clampInt(m.fullScroll-m.fullVisibleRows(), 0, m.fullMaxScroll())
+			case "pgdown":
+				m.fullScroll = clampInt(m.fullScroll+m.fullVisibleRows(), 0, m.fullMaxScroll())
+			case "home":
+				m.fullScroll = 0
+			case "end":
+				m.fullScroll = m.fullMaxScroll()
+			}
+			return m, nil
+		}
 		switch msg.String() {
+		case "s":
+			m.sortMode = true
+			m.sortColumn = 0
+		case "enter":
+			if !m.scheduled && !m.loading && m.err == nil && m.focus == focusPBP {
+				m.fullPbp = true
+				m.fullScroll = 0
+			}
 		case "o":
 			m.expanded = !m.expanded
 			m.clampScrolls()
@@ -241,9 +317,43 @@ func (m detail) Update(msg tea.Msg) (detail, tea.Cmd) {
 			m.scrollFocused(-1)
 		case "down", "j":
 			m.scrollFocused(1)
+		case "pgup":
+			m.pageFocused(-1)
+		case "pgdown":
+			m.pageFocused(1)
 		}
 	}
 	return m, nil
+}
+
+func (m *detail) applySelectedSort() {
+	cols := m.playerCols()
+	if len(cols) == 0 {
+		return
+	}
+	if m.sortColumn < 0 || m.sortColumn >= len(cols) {
+		m.sortColumn = 0
+	}
+	column := cols[m.sortColumn].header
+	if m.sortBy == column {
+		m.sortDesc = !m.sortDesc
+	} else {
+		m.sortBy = column
+		m.sortDesc = true
+	}
+	m.awayScroll, m.homeScroll = 0, 0
+}
+
+// pageFocused moves the active box by approximately one visible screen.
+func (m *detail) pageFocused(direction int) {
+	step := m.pbpVisible()
+	if m.focus != focusPBP {
+		step = m.teamVisibleRows()
+	}
+	if step < 1 {
+		step = 1
+	}
+	m.scrollFocused(direction * step)
 }
 
 // scrollFocused moves the focused box's scroll offset by delta, clamped to that
@@ -289,12 +399,41 @@ func toTeamBox(t backend.TeamDetail) teamBox {
 	for i, p := range t.Players {
 		tb.players[i] = playerStat{
 			name: p.Name, min: p.Min, pts: p.Pts, ast: p.Ast, reb: p.Reb,
-			blk: p.Blk, to: p.To, plusMinus: p.PlusMinus,
+			starter: p.Starter,
+			blk:     p.Blk, to: p.To, plusMinus: p.PlusMinus,
 			fgm: p.FGM, fga: p.FGA, tpm: p.TPM, tpa: p.TPA, ftm: p.FTM, fta: p.FTA,
 			oreb: p.OReb, dreb: p.DReb, stl: p.Stl, pf: p.PF,
 		}
 	}
+	markStartingFive(tb.players)
 	return tb
+}
+
+func markStartingFive(players []playerStat) {
+	count := 0
+	for _, player := range players {
+		if player.starter {
+			count++
+		}
+	}
+	if count == 5 || len(players) < 5 {
+		return
+	}
+	indices := make([]int, len(players))
+	for i := range indices {
+		indices[i] = i
+	}
+	sort.SliceStable(indices, func(i, j int) bool {
+		mi, _ := strconv.Atoi(players[indices[i]].min)
+		mj, _ := strconv.Atoi(players[indices[j]].min)
+		return mi > mj
+	})
+	for i := range players {
+		players[i].starter = false
+	}
+	for _, i := range indices[:5] {
+		players[i].starter = true
+	}
 }
 
 // maxScroll is the furthest the play-by-play feed can scroll back.
@@ -322,14 +461,58 @@ func (m detail) playerColumnBudget() int {
 		return 1 << 30
 	}
 	_, vFrame := docStyle.GetFrameSize()
-	const headerH, blankH, hintH, minSpacerH = 3, 1, 1, 1
-	return m.height - vFrame - headerH - blankH - hintH - minSpacerH
+	const headerH, blankH, minSpacerH = 3, 1, 1
+	return m.height - vFrame - headerH - blankH - lipgloss.Height(m.hints()) - minSpacerH
 }
 
 // sortedByPoints returns a copy of players ordered by points, highest first.
 func sortedByPoints(players []playerStat) []playerStat {
 	out := append([]playerStat(nil), players...)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].pts > out[j].pts })
+	return out
+}
+
+func (m detail) sortedPlayers(players []playerStat) []playerStat {
+	out := append([]playerStat(nil), players...)
+	if m.sortBy == "" {
+		return sortedByPoints(out)
+	}
+	value := func(p playerStat) float64 {
+		switch m.sortBy {
+		case "MIN":
+			v, _ := strconv.ParseFloat(p.min, 64)
+			return v
+		case "PTS":
+			return float64(p.pts)
+		case "FG":
+			return float64(p.fgm)
+		case "3P":
+			return float64(p.tpm)
+		case "FT":
+			return float64(p.ftm)
+		case "REB":
+			return float64(p.reb)
+		case "AST":
+			return float64(p.ast)
+		case "STL":
+			return float64(p.stl)
+		case "BLK":
+			return float64(p.blk)
+		case "TO":
+			return float64(p.to)
+		case "PF":
+			return float64(p.pf)
+		case "+/-":
+			return float64(p.plusMinus)
+		}
+		return float64(p.pts)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if m.sortDesc {
+			return value(out[i]) > value(out[j])
+		}
+		return value(out[i]) < value(out[j])
+	})
 	return out
 }
 
@@ -395,6 +578,8 @@ func (m detail) View() tea.View {
 
 	var body string
 	switch {
+	case m.fullPbp:
+		body = m.renderPBPFullscreen(width)
 	case m.scheduled:
 		note := "Not started"
 		if m.tipoff != "" {
@@ -414,21 +599,10 @@ func (m detail) View() tea.View {
 		body = lipgloss.JoinVertical(lipgloss.Left, m.renderHeader(width), "", m.renderMain(width))
 	}
 
-	// Only the loaded box score has scrollable / expandable content.
-	hint := renderHints([2]string{"q", "back"})
-	if !m.scheduled && !m.loading && m.err == nil {
-		statsDesc := "more stats"
-		if m.expanded {
-			statsDesc = "less stats"
-		}
-		hint = renderHints(
-			[2]string{"tab/←→", "switch box"},
-			[2]string{"↑/k", "up"},
-			[2]string{"↓/j", "down"},
-			[2]string{"o", statsDesc},
-			[2]string{"q", "back"},
-		)
-	}
+	hintWidth := max(contentWidth(m.width), width)
+	hint := m.hintsForWidth(hintWidth)
+
+	body = lipgloss.NewStyle().MaxWidth(contentWidth(m.width)).Render(body)
 
 	// The hint must always stay visible. On a terminal too short to hold the
 	// whole body plus the hint (and a one-line spacer), clip the body rather than
@@ -453,12 +627,61 @@ func (m detail) View() tea.View {
 	return v
 }
 
+func (m detail) hints() string {
+	return m.hintsForWidth(contentWidth(m.width))
+}
+
+func (m detail) hintsForWidth(w int) string {
+	if m.fullPbp {
+		return renderHints(w, [2]string{"↑/↓", "scroll"}, [2]string{"pgup/pgdn", "page"}, [2]string{"enter/esc", "exit full screen"})
+	}
+	// Only the loaded box score has scrollable / expandable content.
+	hint := renderHints(w, [2]string{"t", "teams"}, [2]string{"q", "back"})
+	if m.sortMode {
+		hint = renderHints(w, [2]string{"←/→", "select stat"}, [2]string{"enter/↑/↓", "sort/toggle direction"}, [2]string{"esc/q", "done"})
+	} else if !m.scheduled && !m.loading && m.err == nil {
+		statsDesc := "more stats"
+		if m.expanded {
+			statsDesc = "less stats"
+		}
+		pairs := [][2]string{
+			{"tab/←→", "switch box"},
+			{"↑/k", "up"},
+			{"↓/j", "down"},
+			{"pgup/pgdn", "page"},
+			{"s", "sort"},
+			{"o", statsDesc},
+		}
+		if m.focus == focusPBP {
+			pairs = append(pairs, [2]string{"enter", "full play-by-play"})
+		}
+		pairs = append(pairs, [2]string{"t", "teams"}, [2]string{"q", "back"})
+		hint = renderHints(w, pairs...)
+	}
+
+	return hint
+}
+
 // renderHeader is a centered scoreboard bar using the same away/score/home
 // layout as the list view.
 func (m detail) renderHeader(width int) string {
 	g := m.game
-	line := fmt.Sprintf("%-13s %3d - %-3d %13s",
-		g.away.name, g.away.score, g.home.score, g.home.name)
+	if m.scheduled && g.away.score == 0 && g.home.score == 0 {
+		line := fmt.Sprintf("%-13s %7s %13s", g.away.name, "vs", g.home.name)
+		bar := headerBarSty.Render(line)
+		return lipgloss.PlaceHorizontal(width, lipgloss.Center, bar)
+	}
+	awayScore := fmt.Sprintf("%d", g.away.score)
+	homeScore := fmt.Sprintf("%d", g.home.score)
+	if g.away.score > g.home.score {
+		awayScore = scoreWinnerSty.Render(awayScore)
+		homeScore = scoreLoserSty.Render(homeScore)
+	} else if g.home.score > g.away.score {
+		awayScore = scoreLoserSty.Render(awayScore)
+		homeScore = scoreWinnerSty.Render(homeScore)
+	}
+	line := fmt.Sprintf("%-13s %3s - %-3s %13s",
+		g.away.name, awayScore, homeScore, g.home.name)
 	bar := headerBarSty.Render(line)
 	return lipgloss.PlaceHorizontal(width, lipgloss.Center, bar)
 }
@@ -496,10 +719,10 @@ func (m detail) renderMain(width int) string {
 func (m detail) renderPlayerColumn() string {
 	rows := m.teamVisibleRows()
 	away := m.renderTeamTable(m.game.away, awayColor,
-		sortedByPoints(m.game.away.players), m.focus == focusAway, rows, m.awayScroll)
+		m.sortedPlayers(m.game.away.players), m.focus == focusAway, rows, m.awayScroll)
 	bar := m.renderTeamBar()
 	home := m.renderTeamTable(m.game.home, homeColor,
-		sortedByPoints(m.game.home.players), m.focus == focusHome, rows, m.homeScroll)
+		m.sortedPlayers(m.game.home.players), m.focus == focusHome, rows, m.homeScroll)
 	return lipgloss.JoinVertical(lipgloss.Left, away, "", bar, "", home)
 }
 
@@ -618,14 +841,24 @@ func (m detail) renderTeamTable(t teamBox, teamColor color.Color, players []play
 	title += scrollHint(above, below)
 
 	hdr := pad("PLAYER", wName, false)
-	for _, c := range cols {
-		hdr += " " + pad(c.header, c.width, true)
+	for i, c := range cols {
+		cell := pad(c.header, c.width, true)
+		if m.sortMode && i == m.sortColumn {
+			cell = accentSty.Render(cell)
+		}
+		hdr += " " + cell
 	}
 
 	rows := make([]string, 0, len(window)+2)
 	rows = append(rows, title, colHeaderSty.Render(hdr))
 	for _, p := range window {
-		row := pad(truncate(p.name, wName), wName, false)
+		var playerCell string
+		if p.starter {
+			playerCell = pad("★ "+truncate(p.name, wName-2), wName, false)
+		} else {
+			playerCell = pad(truncate(p.name, wName), wName, false)
+		}
+		row := playerCell
 		for _, c := range cols {
 			row += " " + pad(c.value(p), c.width, true)
 		}
@@ -795,6 +1028,92 @@ func (m detail) renderPBPColumn(w int) string {
 // pbpUnavailable is shown in the feed when no play-by-play could be loaded (the
 // endpoint failed, or the game just tipped off).
 const pbpUnavailable = "Play-by-play unavailable"
+
+// fullPBPRows flattens the feed (newest first) into display rows at width w.
+// A play that doesn't fit wraps onto continuation lines indented under its
+// first line, so nothing is silently truncated in fullscreen mode.
+func (m detail) fullPBPRows(w int) []string {
+	descW := w - wWhen - 2 - wTag - 2
+	if descW < 10 {
+		descW = 10
+	}
+	rows := []string{}
+	for _, p := range m.game.plays {
+		rows = append(rows, renderPlayWrapped(p, m.game.home.tricode, descW)...)
+	}
+	return rows
+}
+
+// renderPlayWrapped renders one play as one or more display rows: the clock
+// and team tag on the first line, overflow words wrapped onto indented lines.
+func renderPlayWrapped(p playEvent, homeTricode string, descW int) []string {
+	when := mutedSty.Render(pad(fmt.Sprintf("Q%d %s", p.period, mmss(p.clock)), wWhen, false))
+	var tag string
+	if p.team == "" {
+		tag = dimRowSty.Render(pad("---", wTag, false))
+	} else {
+		tagColor := awayColor
+		if p.team == homeTricode {
+			tagColor = homeColor
+		}
+		tag = lipgloss.NewStyle().Bold(true).Foreground(tagColor).
+			Render(pad("["+p.team+"]", wTag, false))
+	}
+	prefix := when + "  " + tag + "  "
+	indent := strings.Repeat(" ", wWhen+2+wTag+2)
+	chunks := strings.Split(ansi.Wrap(p.desc, descW, ""), "\n")
+	rows := []string{prefix + chunks[0]}
+	for _, c := range chunks[1:] {
+		rows = append(rows, indent+c)
+	}
+	if p.team == "" {
+		for i := range rows {
+			rows[i] = dimRowSty.Italic(true).Render(rows[i])
+		}
+	}
+	return rows
+}
+
+// fullVisibleRows is how many wrapped feed rows fit in fullscreen mode.
+func (m detail) fullVisibleRows() int {
+	hFrame, vFrame := docStyle.GetFrameSize()
+	width := m.width - hFrame
+	if width < 40 {
+		width = 40
+	}
+	hintH := lipgloss.Height(m.hintsForWidth(max(contentWidth(m.width), width)))
+	room := m.height - vFrame - hintH - 1 - 4 // spacer, header, blank, title, divider
+	return max(1, room)
+}
+
+// fullMaxScroll is the furthest the fullscreen feed can scroll.
+func (m detail) fullMaxScroll() int {
+	rows := m.fullPBPRows(max(1, contentWidth(m.width)-4))
+	return max(0, len(rows)-m.fullVisibleRows())
+}
+
+// renderPBPFullscreen renders the whole body as the play-by-play feed:
+// header on top, then as many wrapped rows as fit.
+func (m detail) renderPBPFullscreen(width int) string {
+	inner := max(1, contentWidth(width)-4)
+	rows := m.fullPBPRows(inner)
+	visible := m.fullVisibleRows()
+	start := clampInt(m.fullScroll, 0, max(0, len(rows)-visible))
+	end := min(len(rows), start+visible)
+	title := colHeaderSty.Render("PLAY-BY-PLAY · FULL SCREEN")
+	if start > 0 {
+		title += hintSty.Render(fmt.Sprintf("   ↑ %d more", start))
+	}
+	if end < len(rows) {
+		title += hintSty.Render(fmt.Sprintf("   ↓ %d more", len(rows)-end))
+	}
+	lines := []string{m.renderHeader(width), "", title, dimRowSty.Render(strings.Repeat("─", inner))}
+	if len(rows) == 0 {
+		lines = append(lines, mutedSty.Render(pbpUnavailable))
+	}
+	lines = append(lines, rows[start:end]...)
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
+}
 
 // play-by-play line layout: "Q2 08:44" (8) + gap + "[NYK]" (5) + gap + desc
 const (
