@@ -205,6 +205,7 @@ func scoreboardGame(g stats.ScoreboardV3Game) Game {
 
 	return Game{
 		GameId:    g.GameID,
+		StartUTC:  g.GameTimeUTC,
 		HomeTeam:  g.HomeTeam.TeamName,
 		AwayTeam:  g.AwayTeam.TeamName,
 		HomeScore: g.HomeTeam.Score,

@@ -14,10 +14,13 @@ Courtside pulls directly from the NBA's public JSON endpoints, using
 [`nba-sdk`](https://github.com/NolanFogarty/nba-sdk) for game feeds and direct
 requests for team and player profiles:
 
-- **cdn.nba.com** — the live "today" scoreboard
-- **stats.nba.com** — scoreboard by date, traditional box scores,
-  play-by-play, standings, rosters, team profiles, player bios, career statistics,
+- **cdn.nba.com** — live box scores and play-by-play (preferred for game details)
+- **stats.nba.com** — today's scoreboard and scoreboard by date, fallback traditional
+  box scores and play-by-play, standings, rosters, team profiles, player bios, career statistics,
   and game logs
+
+If both NBA box-score feeds fail or return no player data, game details fall
+back to ESPN's public scoreboard and game summary. 
 
 Team injury updates and reported salaries come from ESPN's public JSON feeds
 (`site.api.espn.com`), labeled separately in the app. Salary figures are matched
@@ -28,7 +31,7 @@ player pages support manual refresh with `r`, with failures shown per section.
 
 These are unofficial, undocumented endpoints, so there's **no API key or
 account required** but they can change or rate-limit without notice. Live
-games auto-refresh roughly every 15 seconds.
+games auto-refresh roughly every 15 seconds. 
 
 ## Installation
 

@@ -143,6 +143,8 @@ const (
 )
 
 type detail struct {
+	selection     backend.Game
+	source        string
 	gameID        string
 	game          gameDetail
 	loading       bool
@@ -169,7 +171,7 @@ type detail struct {
 // known immediately). A game that hasn't started has no box score / play-by-play
 // to fetch, so we show its tip-off time instead of loading.
 func newDetail(g backend.Game, width, height int) detail {
-	d := detail{gameID: g.GameId, live: g.IsLive(), width: width, height: height}
+	d := detail{selection: g, gameID: g.GameId, live: g.IsLive(), width: width, height: height}
 	d.game.away = teamBox{name: g.AwayTeam, score: g.AwayScore}
 	d.game.home = teamBox{name: g.HomeTeam, score: g.HomeScore}
 	if g.NotStarted() {
@@ -192,11 +194,7 @@ func (m detail) refreshCmd() tea.Cmd {
 	if m.live && m.refreshCount >= maxLiveRefreshes {
 		return nil
 	}
-	id := m.gameID
-	return func() tea.Msg {
-		d, err := backend.GetGameDetail(id)
-		return gameDetailMsg{gameID: id, detail: d, err: err}
-	}
+	return m.Init()
 }
 
 // gameDetailMsg carries the result of the async GetGameDetail fetch.
@@ -210,18 +208,32 @@ type gameDetailMsg struct {
 // watched to final doesn't poll forever.
 const maxLiveRefreshes = 720
 
+type gamePlaysMsg struct {
+	gameID string
+	plays  []backend.PlayLine
+}
+
 func (m detail) Init() tea.Cmd {
 	id := m.gameID
-	return func() tea.Msg {
-		d, err := backend.GetGameDetail(id)
+	selection := m.selection
+	selection.GameId = id
+	return tea.Batch(func() tea.Msg {
+		d, err := backend.GetGameBoxScoreForGame(selection)
 		return gameDetailMsg{gameID: id, detail: d, err: err}
-	}
+	}, func() tea.Msg {
+		return gamePlaysMsg{gameID: id, plays: backend.GetGamePlays(id)}
+	})
 }
 
 func (m detail) Update(msg tea.Msg) (detail, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+	case gamePlaysMsg:
+		if msg.gameID == m.gameID && len(msg.plays) > 0 {
+			m.game.plays = toGameDetail(backend.GameDetail{Plays: msg.plays}).plays
+			m.clampScrolls()
+		}
 	case gameDetailMsg:
 		if msg.gameID != m.gameID {
 			return m, nil
@@ -241,6 +253,7 @@ func (m detail) Update(msg tea.Msg) (detail, tea.Cmd) {
 			}
 		} else {
 			game := toGameDetail(msg.detail)
+			m.source = msg.detail.Source
 			// A scheduled game has no box score yet, so an empty response
 			// must not wipe the seeded header (names and scores).
 			if game.away.name == "" && len(game.away.players) == 0 {
@@ -248,6 +261,11 @@ func (m detail) Update(msg tea.Msg) (detail, tea.Cmd) {
 			}
 			if game.home.name == "" && len(game.home.players) == 0 {
 				game.home = m.game.home
+			}
+			// Play-by-play arrives independently; neither arrival order nor
+			// a temporary feed failure should erase the last good plays.
+			if len(game.plays) == 0 {
+				game.plays = m.game.plays
 			}
 			m.game = game
 			m.err = nil
@@ -682,6 +700,9 @@ func (m detail) renderHeader(width int) string {
 	}
 	line := fmt.Sprintf("%-13s %3s - %-3s %13s",
 		g.away.name, awayScore, homeScore, g.home.name)
+	if m.source != "" {
+		line += "  [Box score: " + m.source + "]"
+	}
 	bar := headerBarSty.Render(line)
 	return lipgloss.PlaceHorizontal(width, lipgloss.Center, bar)
 }

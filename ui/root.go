@@ -83,7 +83,7 @@ func (r root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case standingsLoadedMsg:
 		r.standings, _ = r.standings.Update(msg)
 		return r, nil
-	case gameDetailMsg:
+	case gameDetailMsg, gamePlaysMsg:
 		r.detail, _ = r.detail.Update(msg)
 		return r, nil
 	case teamLoadedMsg:

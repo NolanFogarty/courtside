@@ -47,6 +47,7 @@ func formatTipLocal(t time.Time) string {
 
 type Game struct {
 	GameId    string
+	StartUTC  string
 	HomeTeam  string
 	AwayTeam  string
 	GameClock string
@@ -68,7 +69,7 @@ func GameFromSeasonSchedule(g SeasonGame) Game {
 	if status != statusUpcoming && status != statusLive && status != statusFinal {
 		status = statusUpcoming
 	}
-	return Game{GameId: g.GameID, AwayTeam: g.Away, HomeTeam: g.Home, AwayScore: g.AwayScore, HomeScore: g.HomeScore, GameClock: clock, status: status}
+	return Game{GameId: g.GameID, StartUTC: g.DateTimeUTC, AwayTeam: g.Away, HomeTeam: g.Home, AwayScore: g.AwayScore, HomeScore: g.HomeScore, GameClock: clock, status: status}
 }
 
 // NotStarted reports whether the game is scheduled but hasn't tipped off yet
@@ -110,6 +111,7 @@ func toGame(g live.Game) Game {
 
 	return Game{
 		GameId:    g.GameID,
+		StartUTC:  g.GameTimeUTC,
 		HomeTeam:  g.HomeTeam.TeamName,
 		AwayTeam:  g.AwayTeam.TeamName,
 		GameClock: clock,

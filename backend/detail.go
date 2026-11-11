@@ -2,10 +2,12 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	nba "github.com/NolanFogarty/nba-sdk"
 	"github.com/NolanFogarty/nba-sdk/live"
@@ -54,6 +56,7 @@ type PlayLine struct {
 
 // GameDetail is everything the detail screen needs for one game.
 type GameDetail struct {
+	Source     string // set when an alternative provider supplies the box score
 	Away, Home TeamDetail
 	Plays      []PlayLine // newest first
 }
@@ -65,45 +68,61 @@ type GameDetail struct {
 // removed). stats.nba.com is known to return empty/5xx for live games, so the
 // CDN-first order matters.
 func GetGameDetail(gameID string) (GameDetail, error) {
-	client := nba.NewClient()
-	ctx := context.Background()
-
-	d, err := fetchBoxScore(client, ctx, gameID)
+	d, err := GetGameBoxScore(gameID)
 	if err != nil {
 		return GameDetail{}, err
 	}
 
 	// Play-by-play is best-effort; an unavailable feed shouldn't block the box
 	// score. The next refresh retries.
-	d.Plays = fetchPlayByPlay(client, ctx, gameID)
+	d.Plays = GetGamePlays(gameID)
 	return d, nil
+}
+
+// Each feed has its own deadline and can be displayed independently. Disable
+// long retry chains: live views already retry on their next polling interval.
+func GetGameBoxScore(gameID string) (GameDetail, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	return fetchBoxScore(nba.NewClient(nba.WithRetry(0, 0)), ctx, gameID)
+}
+
+func GetGamePlays(gameID string) []PlayLine {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	return fetchPlayByPlay(nba.NewClient(nba.WithRetry(0, 0)), ctx, gameID)
 }
 
 // fetchBoxScore returns the box score, preferring the live CDN feed and falling
 // back to the stats.nba.com traditional box score.
 func fetchBoxScore(client *nba.Client, ctx context.Context, gameID string) (GameDetail, error) {
-	if box, err := client.Live.BoxScore(ctx, gameID); err == nil {
-		g := box.Game
+	liveBox, liveErr := client.Live.BoxScore(ctx, gameID)
+	var apiErr *nba.APIError
+	if errors.As(liveErr, &apiErr) {
+		liveErr = fmt.Errorf("HTTP %d", apiErr.StatusCode)
+	}
+	if liveErr == nil {
+		g := liveBox.Game
 		if len(g.HomeTeam.Players) > 0 || len(g.AwayTeam.Players) > 0 {
 			detail := GameDetail{
 				Away: liveTeamDetail(g.AwayTeam),
 				Home: liveTeamDetail(g.HomeTeam),
 			}
-			if !hasStarters(detail.Away) || !hasStarters(detail.Home) {
-				if statsBox, statsErr := client.Stats.BoxScoreTraditionalV3(ctx, gameID); statsErr == nil {
-					applyStarterFlags(&detail.Away, statsBox.BoxScoreTraditional.AwayTeam)
-					applyStarterFlags(&detail.Home, statsBox.BoxScoreTraditional.HomeTeam)
-				}
-			}
+			// Missing starter flags must not send a healthy live box score
+			// through the slower stats service before it can be displayed.
 			inferStartersByMinutes(&detail.Away)
 			inferStartersByMinutes(&detail.Home)
 			return detail, nil
 		}
+		liveErr = fmt.Errorf("no player data")
 	}
 
 	box, err := client.Stats.BoxScoreTraditionalV3(ctx, gameID)
 	if err != nil {
-		return GameDetail{}, err
+		return GameDetail{}, fmt.Errorf("box score unavailable for %s (CDN: %v; stats: %w)", gameID, liveErr, err)
+	}
+	if len(box.BoxScoreTraditional.AwayTeam.Players)+len(box.BoxScoreTraditional.HomeTeam.Players) == 0 {
+		return GameDetail{}, fmt.Errorf("box score unavailable for %s (CDN: %v; stats: no player data)", gameID, liveErr)
 	}
 	return GameDetail{
 		Away: toTeamDetail(box.BoxScoreTraditional.AwayTeam),
