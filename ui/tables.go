@@ -169,6 +169,7 @@ type dataTableOptions struct {
 	sorting, wrap                  bool
 	order                          columnSort
 	empty                          string
+	separatorRows                  map[int]bool // full-width rules in place of data rows
 }
 
 type visibleColumn struct{ index, width int }
@@ -333,6 +334,10 @@ func renderDataTable(title string, cols []dataColumn, rows []backend.Row, o data
 	}
 	lines = append(lines, fit(headers), dimRowSty.Render(strings.Repeat("─", width)))
 	for index := start; index < end; index++ {
+		if o.separatorRows[index] {
+			lines = append(lines, dimRowSty.Render(strings.Repeat("─", width)))
+			continue
+		}
 		cells := [][]string{}
 		height := 1
 		for _, v := range visible {

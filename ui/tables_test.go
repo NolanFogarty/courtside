@@ -203,7 +203,7 @@ func TestSelectedTableRowHighlightsUniformly(t *testing.T) {
 	// A caller-prestyled selected row (schedule winner/loser colors) stands
 	// on its own: wrapping it would bury its colors under an outer reset.
 	styled := renderDataTable("T", cols, []backend.Row{
-		dataRow(map[string]any{"TEAM": winBg.Render("Lakers"), "W": 1}),
+		dataRow(map[string]any{"TEAM": lipgloss.NewStyle().Background(lipgloss.Color("22")).Render("Lakers"), "W": 1}),
 	}, dataTableOptions{width: 60, selected: 0})
 	selected = ""
 	for _, line := range strings.Split(styled, "\n") {
@@ -307,8 +307,8 @@ func TestScheduleSelectedRowUsesTextColors(t *testing.T) {
 	if !strings.Contains(selected, "1;92mLakers") {
 		t.Fatalf("schedule selected row must color the winner directly, got %q", selected)
 	}
-	if !strings.Contains(plain, "48;5;") {
-		t.Fatalf("schedule unselected row must keep background blocks, got %q", plain)
+	if strings.Contains(plain, "48;5;") || !strings.Contains(plain, "1;92mKnicks") {
+		t.Fatalf("schedule unselected row must use foreground colors without backgrounds, got %q", plain)
 	}
 }
 

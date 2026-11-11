@@ -101,18 +101,19 @@ func (m schedule) Update(msg tea.Msg) (schedule, tea.Cmd) {
 			m.filter = ""
 		}
 	}
-	count := len(m.filteredGames())
+	rows := m.filteredGames()
+	count := len(rows)
 	if count == 0 {
 		m.selected, m.offset = 0, 0
 		return m, nil
 	}
 	m.selected = max(0, min(m.selected, count-1))
-	m.offset = max(0, min(m.offset, max(0, count-m.pageSize())))
+	m.offset = max(0, min(m.offset, count-1))
 	if m.selected < m.offset {
 		m.offset = m.selected
 	}
-	if m.selected >= m.offset+m.pageSize() {
-		m.offset = m.selected - m.pageSize() + 1
+	for m.selected >= m.pageEnd(rows, m.offset) {
+		m.offset++
 	}
 	return m, nil
 }
@@ -135,8 +136,6 @@ func (m schedule) filteredGames() []backend.SeasonGame {
 	return rows
 }
 
-var winBg = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("22"))
-var lossBg = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("88"))
 var liveSty = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 
 func (m schedule) View() tea.View {
@@ -155,10 +154,9 @@ func (m schedule) View() tea.View {
 	} else {
 		rows := m.filteredGames()
 		tableRows := []backend.Row{}
-		end := m.offset + m.pageSize()
-		if end > len(rows) {
-			end = len(rows)
-		}
+		separators := map[int]bool{}
+		tableSelected := -1
+		end := m.pageEnd(rows, m.offset)
 		start := m.offset
 		if start > len(rows) {
 			start = len(rows)
@@ -168,9 +166,15 @@ func (m schedule) View() tea.View {
 			sel = -1
 		}
 		for idx, g := range rows[start:end] {
+			if idx > 0 && scheduleLocalDate(g) != scheduleLocalDate(rows[start+idx-1]) {
+				separators[len(tableRows)] = true
+				tableRows = append(tableRows, backend.Row{})
+			}
 			isSel := idx == sel
-			// Selected rows use green/red text (never backgrounds) with the
-			// rest in white; unselected finals keep the background blocks.
+			if isSel {
+				tableSelected = len(tableRows)
+			}
+			// Finals use readable green/red foregrounds on every row.
 			// Styles always wrap plain strings directly: wrapping a styled
 			// span buries the color under an inner reset.
 			base := func(s string) string {
@@ -207,23 +211,13 @@ func (m schedule) View() tea.View {
 			case final && g.AwayScore > g.HomeScore:
 				awayScore = winTextSty.Render(awayScore)
 				homeScore = lossTextSty.Render(homeScore)
-				if isSel {
-					away, home = winTextSty.Render(away), lossTextSty.Render(home)
-					score = awayScore + base(" - ") + homeScore
-				} else {
-					away, home = winBg.Render(away), lossBg.Render(home)
-					score = winBg.Render(awayScore) + " - " + lossBg.Render(homeScore)
-				}
+				away, home = winTextSty.Render(away), lossTextSty.Render(home)
+				score = awayScore + base(" - ") + homeScore
 			case final && g.HomeScore > g.AwayScore:
 				awayScore = lossTextSty.Render(awayScore)
 				homeScore = winTextSty.Render(homeScore)
-				if isSel {
-					away, home = lossTextSty.Render(away), winTextSty.Render(home)
-					score = awayScore + base(" - ") + homeScore
-				} else {
-					away, home = lossBg.Render(away), winBg.Render(home)
-					score = lossBg.Render(awayScore) + " - " + winBg.Render(homeScore)
-				}
+				away, home = lossTextSty.Render(away), winTextSty.Render(home)
+				score = awayScore + base(" - ") + homeScore
 			case final:
 				score, away, home = base(score), base(away), base(home)
 			case live:
@@ -239,7 +233,7 @@ func (m schedule) View() tea.View {
 			tableTitle += fmt.Sprintf(" · %d–%d / %d", start+1, end, len(rows))
 		}
 		cols := []dataColumn{textColumn("DATE", "DATE", 10), textColumn("AWAY", "AWAY · RECORD", 28), textColumn("HOME", "HOME · RECORD", 28), textColumn("SCORE", "SCORE / TIP-OFF", 21)}
-		lines = strings.Split(renderDataTable(tableTitle, cols, tableRows, dataTableOptions{width: contentWidth(m.width), selected: sel, columnOffset: m.columnOffset, empty: "No games match this filter."}), "\n")
+		lines = strings.Split(renderDataTable(tableTitle, cols, tableRows, dataTableOptions{width: contentWidth(m.width), selected: tableSelected, separatorRows: separators, columnOffset: m.columnOffset, empty: "No games match this filter."}), "\n")
 	}
 	if m.filtering {
 		lines = append(lines, "Type team name • enter apply • esc clear")
@@ -278,6 +272,27 @@ func (m schedule) pageSize() int {
 		room--
 	}
 	return max(1, room)
+}
+
+// pageEnd limits rendered table rows, including day separators, to the same
+// body-height budget used by pageSize. The offset and selection remain game indices.
+func (m schedule) pageEnd(rows []backend.SeasonGame, start int) int {
+	start = clampInt(start, 0, len(rows))
+	budget := m.pageSize()
+	used := 0
+	end := start
+	for end < len(rows) {
+		cost := 1
+		if end > start && scheduleLocalDate(rows[end]) != scheduleLocalDate(rows[end-1]) {
+			cost++
+		}
+		if used+cost > budget {
+			break
+		}
+		used += cost
+		end++
+	}
+	return end
 }
 
 func isLiveScheduleGame(g backend.SeasonGame) bool {
