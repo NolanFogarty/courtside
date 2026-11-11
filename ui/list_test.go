@@ -226,12 +226,11 @@ func TestUnplayedGamesShowTBDInsteadOfZeroZero(t *testing.T) {
 	if line := ansi.Strip(formatGameLine(final, 40, false)); !strings.Contains(line, "Lakers @ Celtics  110 - 105") || !strings.Contains(line, "Final") {
 		t.Fatalf("final must show teams with @, scores, and a Final column, got %q", line)
 	}
-	// Unselected finals put team names on background blocks with green/red
-	// text scores; the selected row uses green/red text throughout.
+	// All finals use green/red foregrounds for teams and scores.
 	rawFinal := formatGameLine(final, 40, false)
-	for _, code := range []string{"48;5;22", "48;5;88", "1;92m", "[91m"} {
+	for _, code := range []string{"1;92m", "[91m"} {
 		if !strings.Contains(rawFinal, code) {
-			t.Fatalf("unselected final must background-highlight teams, got %q", rawFinal)
+			t.Fatalf("unselected final must foreground-highlight teams, got %q", rawFinal)
 		}
 	}
 	homeWin := backend.GameFromSeasonSchedule(backend.SeasonGame{
@@ -401,9 +400,9 @@ func TestSelectedFinalRowHighlightsUniformly(t *testing.T) {
 			t.Fatalf("selected row must use text highlights, got %q", selected)
 		}
 	}
-	// Unselected rows keep the background blocks on team names.
-	if !strings.Contains(plain, "48;5;22") || !strings.Contains(plain, "48;5;88") {
-		t.Fatalf("unselected row must background-highlight teams, got %q", plain)
+	// Unselected rows use the same readable foreground colors.
+	if strings.Contains(plain, "48;5;") || !strings.Contains(plain, "1;92mLakers") {
+		t.Fatalf("unselected row must use foreground colors without backgrounds, got %q", plain)
 	}
 	if got := ansi.Strip(selected); !strings.Contains(got, "Bulls @ Knicks") || !strings.Contains(got, "90 - 100") {
 		t.Fatalf("selected row must keep the full matchup, got %q", got)

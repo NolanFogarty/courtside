@@ -573,8 +573,9 @@ func (m gamelist) View() tea.View {
 }
 
 // datePickerView renders the month calendar for "go to date" in place of the
-// schedule. The cursor day is bright, today is underlined, the currently
-// viewed day is blue, and days past today are dimmed (unreachable).
+// schedule. The cursor day is bright and underlined to match the displayed
+// selection; today is bold, the viewed day is blue, and days past
+// today are dimmed (unreachable).
 func (m gamelist) datePickerView() tea.View {
 	body := lipgloss.PlaceHorizontal(contentWidth(m.width), lipgloss.Center,
 		panelSty.Render(lipgloss.JoinVertical(lipgloss.Left, m.calendarLines()...)))
@@ -616,9 +617,9 @@ func (m gamelist) calendarLines() []string {
 		cell := fmt.Sprintf(" %2d ", d)
 		switch {
 		case sameDay(day, m.pickDay):
-			cell = accentSty.Render(cell)
+			cell = accentSty.Underline(true).Render(cell)
 		case sameDay(day, today):
-			cell = lipgloss.NewStyle().Bold(true).Underline(true).Render(cell)
+			cell = lipgloss.NewStyle().Bold(true).Render(cell)
 		case sameDay(day, m.day):
 			cell = lipgloss.NewStyle().Foreground(awayColor).Render(cell)
 		case afterToday(day):
@@ -653,6 +654,9 @@ func (m gamelist) columnsView() string {
 	colW := (w - 2) / 2 // two panels plus a two-space gap
 	east := m.conferencePanel(colEast, colW)
 	west := m.conferencePanel(colWest, colW)
+	height := max(lipgloss.Height(east), lipgloss.Height(west))
+	east = m.conferencePanel(colEast, colW, height)
+	west = m.conferencePanel(colWest, colW, height)
 	tables := lipgloss.JoinHorizontal(lipgloss.Top, east, "  ", west)
 	return lipgloss.PlaceHorizontal(w, lipgloss.Center, tables)
 }
@@ -660,7 +664,7 @@ func (m gamelist) columnsView() string {
 // conferencePanel renders one conference's games for the current page. width
 // is the panel's total width including its border; every content line is a
 // two-cell gutter plus text so panels line up with or without a highlight.
-func (m gamelist) conferencePanel(col, width int) string {
+func (m gamelist) conferencePanel(col, width int, minHeight ...int) string {
 	games := m.columnGames(col)
 	name := "EASTERN"
 	color := awayColor
@@ -701,11 +705,15 @@ func (m gamelist) conferencePanel(col, width int) string {
 	if col == m.selCol && len(games) > 0 {
 		sty = focusedPanelSty
 	}
+	if len(minHeight) > 0 {
+		sty = sty.Height(minHeight[0])
+	}
 	return sty.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
 // Winner/loser colors for final games: bright green for the winner's team
-// and score, bright red for the loser's. No background blocks.
+// and score, bright red for the loser's. Backgrounds are reserved for row
+// selection, not game outcome.
 var (
 	winTextSty  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
 	lossTextSty = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
@@ -714,9 +722,8 @@ var (
 // formatGameLine renders one game as a single line: the matchup on the left
 // and the status (Final, live clock, tip time, or TBD) in its own column on
 // the right. Played games read "AWAY @ HOME  110 - 105". Finals highlight
-// the winner green and the loser red: unselected rows put the team names on
-// background blocks (scores go green/red text), while the selected row uses
-// green/red text for teams and scores with the rest in white.
+// the winner green and the loser red in the foreground; selection remains
+// indicated by the row's selection marker and selected styling.
 func formatGameLine(g backend.Game, width int, selected bool) string {
 	// Base style for the row's ordinary text: plain normally, white when
 	// selected. Winner/loser parts keep their green/red on both.
@@ -750,27 +757,18 @@ func formatGameLine(g backend.Game, width int, selected bool) string {
 		away := ansi.Truncate(g.AwayTeam, (teams+1)/2, "…")
 		home := ansi.Truncate(g.HomeTeam, teams-lipgloss.Width(away), "…")
 		at, pad2, dash := base(" @ "), base("  "), base(" - ")
-		// Winner/loser styles wrap the plain strings directly: wrapping an
-		// already-styled span buries the color under an inner reset and the
-		// selected row renders all white.
+		// Apply outcome colors directly to plain spans so they remain readable
+		// in both selected and unselected rows.
 		if g.IsFinal() {
 			switch {
 			case g.AwayScore > g.HomeScore:
 				awayScore = winTextSty.Render(awayScore)
 				homeScore = lossTextSty.Render(homeScore)
-				if selected {
-					away, home = winTextSty.Render(away), lossTextSty.Render(home)
-				} else {
-					away, home = winBg.Render(away), lossBg.Render(home)
-				}
+				away, home = winTextSty.Render(away), lossTextSty.Render(home)
 			case g.HomeScore > g.AwayScore:
 				awayScore = lossTextSty.Render(awayScore)
 				homeScore = winTextSty.Render(homeScore)
-				if selected {
-					away, home = lossTextSty.Render(away), winTextSty.Render(home)
-				} else {
-					away, home = lossBg.Render(away), winBg.Render(home)
-				}
+				away, home = lossTextSty.Render(away), winTextSty.Render(home)
 			default:
 				away, home = base(away), base(home)
 				awayScore, homeScore = base(awayScore), base(homeScore)
