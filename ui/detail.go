@@ -144,7 +144,6 @@ const (
 
 type detail struct {
 	selection     backend.Game
-	source        string
 	gameID        string
 	game          gameDetail
 	loading       bool
@@ -253,7 +252,6 @@ func (m detail) Update(msg tea.Msg) (detail, tea.Cmd) {
 			}
 		} else {
 			game := toGameDetail(msg.detail)
-			m.source = msg.detail.Source
 			// A scheduled game has no box score yet, so an empty response
 			// must not wipe the seeded header (names and scores).
 			if game.away.name == "" && len(game.away.players) == 0 {
@@ -700,9 +698,6 @@ func (m detail) renderHeader(width int) string {
 	}
 	line := fmt.Sprintf("%-13s %3s - %-3s %13s",
 		g.away.name, awayScore, homeScore, g.home.name)
-	if m.source != "" {
-		line += "  [Box score: " + m.source + "]"
-	}
 	bar := headerBarSty.Render(line)
 	return lipgloss.PlaceHorizontal(width, lipgloss.Center, bar)
 }
