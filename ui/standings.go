@@ -93,14 +93,14 @@ func (m standings) View() tea.View {
 				mutedSty.Render("No standings published for this season yet."))
 		} else if m.expanded {
 			if m.showWest {
-				main = renderConference("WESTERN", homeColor, m.data.West, true)
+				main = renderConferenceFocused("WESTERN", homeColor, m.data.West, true, true)
 			} else {
-				main = renderConference("EASTERN", awayColor, m.data.East, true)
+				main = renderConferenceFocused("EASTERN", awayColor, m.data.East, true, true)
 			}
 			main = lipgloss.PlaceHorizontal(width, lipgloss.Center, main)
 		} else {
-			east := renderConference("EASTERN", awayColor, m.data.East, false)
-			west := renderConference("WESTERN", homeColor, m.data.West, false)
+			east := renderConferenceFocused("EASTERN", awayColor, m.data.East, false, !m.showWest)
+			west := renderConferenceFocused("WESTERN", homeColor, m.data.West, false, m.showWest)
 			tables := lipgloss.JoinHorizontal(lipgloss.Top, east, "  ", west)
 			if lipgloss.Width(tables) > width {
 				tables = east
@@ -158,6 +158,10 @@ const (
 )
 
 func renderConference(title string, teamColor color.Color, rows []backend.Standing, expanded bool) string {
+	return renderConferenceFocused(title, teamColor, rows, expanded, false)
+}
+
+func renderConferenceFocused(title string, teamColor color.Color, rows []backend.Standing, expanded, focused bool) string {
 	header := pad("#", wRank, true) + " " + pad("", wClinch, false) + " " +
 		pad("TEAM", wTeam, false) + " " +
 		pad("W", wWL, true) + " " + pad("L", wWL, true) + " " +
@@ -197,7 +201,11 @@ func renderConference(title string, teamColor color.Color, rows []backend.Standi
 		}
 	}
 
-	return panelSty.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	sty := panelSty
+	if focused {
+		sty = focusedPanelSty
+	}
+	return sty.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
 // pctStr renders a win percentage NBA-style: ".652", "1.000".
