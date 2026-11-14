@@ -16,6 +16,8 @@ type standings struct {
 	loading       bool
 	err           error
 	data          backend.Standings
+	expanded      bool
+	showWest      bool
 	width, height int
 }
 
@@ -47,6 +49,17 @@ func (m standings) Update(msg tea.Msg) (standings, tea.Cmd) {
 		} else {
 			m.data = msg.data
 		}
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "o":
+			m.expanded = !m.expanded
+		case "left", "h":
+			m.showWest = false
+		case "right", "l":
+			m.showWest = true
+		case "tab", "shift+tab":
+			m.showWest = !m.showWest
+		}
 	}
 	return m, nil
 }
@@ -75,14 +88,50 @@ func (m standings) View() tea.View {
 		main = lipgloss.PlaceHorizontal(width, lipgloss.Center,
 			mutedSty.Render("Loading standings…"))
 	default:
-		east := renderConference("EASTERN", awayColor, m.data.East)
-		west := renderConference("WESTERN", homeColor, m.data.West)
-		tables := lipgloss.JoinHorizontal(lipgloss.Top, east, "  ", west)
-		main = lipgloss.PlaceHorizontal(width, lipgloss.Center, tables)
+		if len(m.data.East) == 0 && len(m.data.West) == 0 {
+			main = lipgloss.PlaceHorizontal(width, lipgloss.Center,
+				mutedSty.Render("No standings published for this season yet."))
+		} else if m.expanded {
+			if m.showWest {
+				main = renderConferenceFocused("WESTERN", homeColor, m.data.West, true, true)
+			} else {
+				main = renderConferenceFocused("EASTERN", awayColor, m.data.East, true, true)
+			}
+			main = lipgloss.PlaceHorizontal(width, lipgloss.Center, main)
+		} else {
+			east := renderConferenceFocused("EASTERN", awayColor, m.data.East, false, !m.showWest)
+			west := renderConferenceFocused("WESTERN", homeColor, m.data.West, false, m.showWest)
+			tables := lipgloss.JoinHorizontal(lipgloss.Top, east, "  ", west)
+			if lipgloss.Width(tables) > width {
+				tables = east
+				if m.showWest {
+					tables = west
+				}
+			}
+			main = lipgloss.PlaceHorizontal(width, lipgloss.Center, tables)
+		}
 	}
 
-	body := lipgloss.JoinVertical(lipgloss.Left, title, "", main)
-	hint := renderHints([2]string{"q", "back"})
+	body := lipgloss.NewStyle().MaxWidth(contentWidth(m.width)).Render(lipgloss.JoinVertical(lipgloss.Left, title, "", main))
+	statsHint := "more stats"
+	if m.expanded {
+		statsHint = "less stats"
+	}
+	hintWidth := max(contentWidth(m.width), width)
+	var hint string
+	if m.expanded {
+		conference := "EAST"
+		if m.showWest {
+			conference = "WEST"
+		}
+		hint = renderHints(hintWidth, [2]string{"tab/←→", "conference (" + conference + ")"}, [2]string{"o", statsHint}, [2]string{"t", "teams"}, [2]string{"q", "back"})
+	} else {
+		hint = renderHints(hintWidth, [2]string{"tab/←→", "conference"}, [2]string{"o", statsHint}, [2]string{"t", "teams"}, [2]string{"q", "back"})
+	}
+
+	if room := m.height - vFrame - lipgloss.Height(hint) - 1; room > 0 && lipgloss.Height(body) > room {
+		body = lipgloss.NewStyle().MaxHeight(room).Render(body)
+	}
 
 	spacerH := m.height - vFrame - lipgloss.Height(body) - lipgloss.Height(hint)
 	if spacerH < 1 {
@@ -108,12 +157,21 @@ const (
 	wStrk   = 4
 )
 
-func renderConference(title string, teamColor color.Color, rows []backend.Standing) string {
+func renderConference(title string, teamColor color.Color, rows []backend.Standing, expanded bool) string {
+	return renderConferenceFocused(title, teamColor, rows, expanded, false)
+}
+
+func renderConferenceFocused(title string, teamColor color.Color, rows []backend.Standing, expanded, focused bool) string {
 	header := pad("#", wRank, true) + " " + pad("", wClinch, false) + " " +
 		pad("TEAM", wTeam, false) + " " +
 		pad("W", wWL, true) + " " + pad("L", wWL, true) + " " +
 		pad("PCT", wPct, true) + " " + pad("GB", wGB, true) + " " +
 		pad("L10", wL10, true) + " " + pad("STRK", wStrk, true)
+	if expanded {
+		header += " " + pad("CONF", 7, true) + " " + pad("DIV", 7, true) +
+			" " + pad("HOME", 5, true) + " " + pad("ROAD", 5, true) +
+			" " + pad("PF", 5, true) + " " + pad("PA", 5, true) + " " + pad("DIFF", 5, true)
+	}
 
 	titleLine := lipgloss.PlaceHorizontal(lipgloss.Width(header), lipgloss.Center,
 		lipgloss.NewStyle().Bold(true).Foreground(teamColor).Render(title))
@@ -133,9 +191,21 @@ func renderConference(title string, teamColor color.Color, rows []backend.Standi
 				pad(gbStr(s.GamesBack), wGB, true)+" "+
 				pad(s.L10, wL10, true)+" "+
 				pad(s.Streak, wStrk, true))
+		if expanded {
+			last := len(lines) - 1
+			lines[last] += " " + pad(s.ConfRecord, 7, true) + " " + pad(s.DivRecord, 7, true) +
+				" " + pad(s.HomeRecord, 5, true) + " " + pad(s.RoadRecord, 5, true) +
+				" " + pad(fmt.Sprintf("%.1f", s.PointsPG), 5, true) + " " +
+				pad(fmt.Sprintf("%.1f", s.OppPointsPG), 5, true) + " " +
+				pad(fmt.Sprintf("%.1f", s.DiffPointsPG), 5, true)
+		}
 	}
 
-	return panelSty.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	sty := panelSty
+	if focused {
+		sty = focusedPanelSty
+	}
+	return sty.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
 // pctStr renders a win percentage NBA-style: ".652", "1.000".

@@ -1,9 +1,9 @@
 package ui
 
 import (
+	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 	"github.com/NolanFogarty/courtside/backend"
 )
@@ -12,6 +12,9 @@ const (
 	listview int = iota
 	detailview
 	standingsview
+	scheduleview
+	teamview
+	playerview
 )
 
 // refreshInterval is how often live data (the list while viewing today, and an
@@ -26,17 +29,25 @@ func refreshTick() tea.Cmd {
 }
 
 type root struct {
-	current       int
-	list          gamelist
-	detail        detail
-	standings     standings
-	width, height int
+	current        int
+	detailReturn   int
+	list           gamelist
+	detail         detail
+	standings      standings
+	schedule       schedule
+	scheduleReturn int
+	teams          teams
+	player         player
+	teamReturn     int
+	playerRequest  int
+	width, height  int
 }
 
 func newRoot(games []backend.Game) root {
 	return root{
 		current: listview,
 		list:    newGamesList(games),
+		teams:   newTeams(0, 0),
 	}
 }
 
@@ -57,7 +68,42 @@ func (r root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.list = updated.(gamelist)
 		r.detail, _ = r.detail.Update(ws)
 		r.standings, _ = r.standings.Update(ws)
+		r.schedule, _ = r.schedule.Update(ws)
+		r.teams, _ = r.teams.Update(ws)
+		r.player, _ = r.player.Update(ws)
 		return r, cmd
+	}
+
+	// Async responses belong to their models even when a different page is
+	// active. Request IDs prevent an old team or player fetch replacing a new one.
+	switch msg.(type) {
+	case scheduleLoaded:
+		r.schedule, _ = r.schedule.Update(msg)
+		return r, nil
+	case standingsLoadedMsg:
+		r.standings, _ = r.standings.Update(msg)
+		return r, nil
+	case gameDetailMsg, gamePlaysMsg:
+		r.detail, _ = r.detail.Update(msg)
+		return r, nil
+	case teamLoadedMsg:
+		r.teams, _ = r.teams.Update(msg)
+		return r, nil
+	case playerLoadedMsg:
+		r.player, _ = r.player.Update(msg)
+		return r, nil
+	}
+	if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "t" && r.navigationAvailable() {
+		if r.current == teamview || r.current == playerview {
+			return r, nil
+		}
+		r.teamReturn = r.current
+		if r.teams.width == 0 {
+			r.teams = newTeams(r.width, r.height)
+		}
+		r.teams.browsing, r.teams.filtering = true, false
+		r.current = teamview
+		return r, nil
 	}
 
 	// Auto-refresh heartbeat: re-fetch whichever view is active and wants fresh
@@ -66,7 +112,9 @@ func (r root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		switch r.current {
 		case listview:
-			cmd = r.list.refreshCmd()
+			var rollCmd tea.Cmd
+			r.list, rollCmd = r.list.rolloverCmd()
+			cmd = rollCmd
 		case detailview:
 			cmd = r.detail.refreshCmd()
 		}
@@ -87,14 +135,23 @@ func (r root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch r.current {
 	case listview:
-		// Enter opens the selected game; "s" opens standings. Both are ignored
-		// while the list is filtering or the user is typing a date to jump to.
+		// Enter opens the selected game; "s" opens standings; "q" quits.
+		// All are ignored while the list is filtering or the date picker is
+		// open, so typing never triggers navigation.
 		if key, ok := msg.(tea.KeyPressMsg); ok &&
-			r.list.list.FilterState() != list.Filtering && !r.list.entering {
+			!r.list.filtering && !r.list.entering {
 			switch key.String() {
+			case "q":
+				return r, tea.Quit
+			case "a":
+				r.schedule = newSchedule(r.width, r.height)
+				r.scheduleReturn = listview
+				r.current = scheduleview
+				return r, r.schedule.Init()
 			case "enter":
-				if sel, ok := r.list.list.SelectedItem().(item); ok {
-					r.detail = newDetail(sel.game, r.width, r.height)
+				if sel, ok := r.list.selectedGame(); ok {
+					r.detail = newDetail(sel, r.width, r.height)
+					r.detailReturn = listview
 					r.current = detailview
 					return r, r.detail.Init() // kick off the async fetch
 				}
@@ -111,9 +168,14 @@ func (r root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case detailview:
 		if key, ok := msg.(tea.KeyPressMsg); ok {
+			if r.detail.sortMode || r.detail.fullPbp {
+				var cmd tea.Cmd
+				r.detail, cmd = r.detail.Update(msg)
+				return r, cmd
+			}
 			switch key.String() {
 			case "esc", "q":
-				r.current = listview
+				r.current = r.detailReturn
 				return r, nil
 			}
 		}
@@ -134,6 +196,88 @@ func (r root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		r.standings, cmd = r.standings.Update(msg)
 		return r, cmd
+	case teamview:
+		if _, ok := msg.(tea.KeyPressMsg); ok && r.teams.sortMode {
+			var cmd tea.Cmd
+			r.teams, cmd = r.teams.Update(msg)
+			return r, cmd
+		}
+		if key, ok := msg.(tea.KeyPressMsg); ok && !r.teams.filtering {
+			switch key.String() {
+			case "q":
+				if !r.teams.browsing {
+					r.current = r.teamReturn
+				} else if r.teams.filter != "" {
+					r.teams.filter = ""
+					r.teams.choice = 0
+				} else {
+					r.current = r.teamReturn
+				}
+				return r, nil
+			case "esc":
+				if !r.teams.browsing {
+					r.teams.browsing = true
+				} else if r.teams.filter != "" {
+					r.teams.filter = ""
+					r.teams.choice = 0
+				} else {
+					r.current = r.teamReturn
+				}
+				return r, nil
+			case "a":
+				if !r.teams.browsing {
+					r.schedule = newSchedule(r.width, r.height)
+					words := strings.Fields(r.teams.data.Team.Name)
+					r.schedule.filter = words[len(words)-1]
+					r.scheduleReturn = teamview
+					r.current = scheduleview
+					return r, r.schedule.Init()
+				}
+			case "enter":
+				if p, ok := r.teams.SelectedPlayer(); ok && p.ID > 0 {
+					r.playerRequest++
+					r.player = newPlayer(p, r.teams.data.Team, r.width, r.height, r.playerRequest)
+					r.current = playerview
+					return r, r.player.Init()
+				}
+			}
+		}
+		var cmd tea.Cmd
+		r.teams, cmd = r.teams.Update(msg)
+		return r, cmd
+	case playerview:
+		if _, ok := msg.(tea.KeyPressMsg); ok && r.player.sortMode {
+			var cmd tea.Cmd
+			r.player, cmd = r.player.Update(msg)
+			return r, cmd
+		}
+		if key, ok := msg.(tea.KeyPressMsg); ok && (key.String() == "esc" || key.String() == "q") {
+			r.current = teamview
+			return r, nil
+		}
+		var cmd tea.Cmd
+		r.player, cmd = r.player.Update(msg)
+		r.playerRequest = max(r.playerRequest, r.player.request)
+		return r, cmd
+
+	case scheduleview:
+		if key, ok := msg.(tea.KeyPressMsg); ok {
+			if !r.schedule.filtering && (key.String() == "q" || (key.String() == "esc" && r.schedule.filter == "")) {
+				r.current = r.scheduleReturn
+				return r, nil
+			}
+			if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "enter" && !r.schedule.filtering {
+				if game, found := r.schedule.SelectedGame(); found {
+					r.detail = newDetail(game, r.width, r.height)
+					r.detailReturn = scheduleview
+					r.current = detailview
+					return r, r.detail.Init()
+				}
+			}
+		}
+		var cmd tea.Cmd
+		r.schedule, cmd = r.schedule.Update(msg)
+		return r, cmd
 	}
 
 	return r, nil
@@ -145,7 +289,30 @@ func (r root) View() tea.View {
 		return r.detail.View()
 	case standingsview:
 		return r.standings.View()
+	case scheduleview:
+		return r.schedule.View()
+	case teamview:
+		return r.teams.View()
+	case playerview:
+		return r.player.View()
 	default:
 		return r.list.View()
 	}
+}
+
+// Top-level shortcuts yield to text inputs and the box-score sort controls.
+func (r root) navigationAvailable() bool {
+	switch r.current {
+	case listview:
+		return !r.list.entering && !r.list.filtering
+	case scheduleview:
+		return !r.schedule.filtering
+	case teamview:
+		return !r.teams.filtering && !r.teams.sortMode
+	case playerview:
+		return !r.player.sortMode
+	case detailview:
+		return !r.detail.sortMode
+	}
+	return true
 }

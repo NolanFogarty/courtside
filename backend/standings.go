@@ -12,15 +12,22 @@ import (
 
 // Standing is one team's row in the conference standings.
 type Standing struct {
-	Rank      int
-	Team      string // nickname
-	Wins      int
-	Losses    int
-	PCT       float64
-	GamesBack float64
-	L10       string
-	Streak    string
-	Clinch    string // clinch/elimination marker (x, y, e, …), "" if none
+	Rank         int
+	Team         string // nickname
+	Wins         int
+	Losses       int
+	PCT          float64
+	GamesBack    float64
+	L10          string
+	Streak       string
+	Clinch       string // clinch/elimination marker (x, y, e, …), "" if none
+	ConfRecord   string
+	DivRecord    string
+	HomeRecord   string
+	RoadRecord   string
+	PointsPG     float64
+	OppPointsPG  float64
+	DiffPointsPG float64
 }
 
 // Standings holds the league standings split by conference, each sorted by
@@ -34,8 +41,10 @@ type Standings struct {
 // GetStandings fetches the current regular-season standings.
 func GetStandings() (Standings, error) {
 	season := currentSeason()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	client := nba.NewClient()
-	resp, err := client.Stats.LeagueStandingsV3(context.Background(), season)
+	resp, err := client.Stats.LeagueStandingsV3(ctx, season)
 	if err != nil {
 		return Standings{}, err
 	}
@@ -43,21 +52,35 @@ func GetStandings() (Standings, error) {
 	out := Standings{Season: season}
 	for _, t := range resp.Standings {
 		s := Standing{
-			Rank:      t.PlayoffRank,
-			Team:      t.TeamName,
-			Wins:      t.Wins,
-			Losses:    t.Losses,
-			PCT:       t.WinPCT,
-			GamesBack: t.ConferenceGamesBack,
-			L10:       t.L10,
-			Streak:    t.StrCurrentStreak,
-			Clinch:    clinchMark(t.ClinchIndicator),
+			Rank:         t.PlayoffRank,
+			Team:         t.TeamName,
+			Wins:         t.Wins,
+			Losses:       t.Losses,
+			PCT:          t.WinPCT,
+			GamesBack:    t.ConferenceGamesBack,
+			L10:          t.L10,
+			Streak:       t.StrCurrentStreak,
+			Clinch:       clinchMark(t.ClinchIndicator),
+			ConfRecord:   t.ConferenceRecord,
+			DivRecord:    t.DivisionRecord,
+			HomeRecord:   t.Home,
+			RoadRecord:   t.Road,
+			PointsPG:     t.PointsPG,
+			OppPointsPG:  t.OppPointsPG,
+			DiffPointsPG: t.DiffPointsPG,
 		}
-		switch t.Conference {
-		case "East":
+		switch strings.ToLower(strings.TrimSpace(t.Conference)) {
+		case "east":
 			out.East = append(out.East, s)
-		case "West":
+		case "west":
 			out.West = append(out.West, s)
+		default:
+			// Don't silently drop teams with unexpected conference labels.
+			if len(out.East) <= len(out.West) {
+				out.East = append(out.East, s)
+			} else {
+				out.West = append(out.West, s)
+			}
 		}
 	}
 
@@ -69,25 +92,28 @@ func GetStandings() (Standings, error) {
 // clinchMark reduces an NBA clinch indicator (e.g. " - x", " - e") to its
 // short marker ("x", "e"), or "" if there is none.
 func clinchMark(indicator string) string {
-	f := strings.Fields(indicator)
-	if len(f) == 0 {
-		return ""
+	for _, f := range strings.Fields(indicator) {
+		if f == "-" || f == "" {
+			continue
+		}
+		// Return the last meaningful token; indicators are short markers.
+		if len(f) <= 3 {
+			return f
+		}
 	}
-	return f[len(f)-1]
+	return ""
 }
 
-// currentSeason returns the NBA season string ("YYYY-YY") for today (ET). The
-// season starts in October.
+// currentSeason returns the NBA season string ("YYYY-YY") for today in the
+// viewer's local time zone. The preseason starts in September, so September
+// rolls to the new season.
 func currentSeason() string {
-	now := time.Now()
-	if loc, err := time.LoadLocation("America/New_York"); err == nil {
-		now = now.In(loc)
-	}
+	now := time.Now().Local()
 	year := now.Year()
-	if now.Month() < time.October {
+	if now.Month() < time.September {
 		// e.g. May 2026 → "2025-26"
 		return fmt.Sprintf("%d-%02d", year-1, year%100)
 	}
-	// e.g. October 2026 → "2026-27"
+	// e.g. September 2026 → "2026-27"
 	return fmt.Sprintf("%d-%02d", year, (year+1)%100)
 }
